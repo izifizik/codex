@@ -594,14 +594,23 @@ fn validate_compaction_replacement(
         return Err("PreCompact replacement is empty".to_string());
     }
     if items.iter().any(|item| {
-        matches!(
+        !matches!(
             item,
-            codex_protocol::models::ResponseItem::AdditionalTools { .. }
-                | codex_protocol::models::ResponseItem::Compaction { .. }
-                | codex_protocol::models::ResponseItem::ConfigurationUpdate { .. }
+            codex_protocol::models::ResponseItem::Message { .. }
+                | codex_protocol::models::ResponseItem::AgentMessage { .. }
+                | codex_protocol::models::ResponseItem::Reasoning { .. }
+                | codex_protocol::models::ResponseItem::LocalShellCall { .. }
+                | codex_protocol::models::ResponseItem::FunctionCall { .. }
+                | codex_protocol::models::ResponseItem::ToolSearchCall { .. }
+                | codex_protocol::models::ResponseItem::FunctionCallOutput { .. }
+                | codex_protocol::models::ResponseItem::CustomToolCall { .. }
+                | codex_protocol::models::ResponseItem::CustomToolCallOutput { .. }
+                | codex_protocol::models::ResponseItem::ToolSearchOutput { .. }
+                | codex_protocol::models::ResponseItem::WebSearchCall { .. }
+                | codex_protocol::models::ResponseItem::ImageGenerationCall { .. }
         )
     }) {
-        return Err("PreCompact replacement contains Codex-owned context".to_string());
+        return Err("PreCompact replacement contains unsupported context item".to_string());
     }
     Ok(items)
 }
@@ -1141,7 +1150,10 @@ mod tests {
         }))
         .expect("valid compaction item");
 
-        assert!(validate_compaction_replacement(vec![item]).is_err());
+        assert_eq!(
+            validate_compaction_replacement(vec![item]),
+            Err("PreCompact replacement contains unsupported context item".to_string())
+        );
     }
 
     #[test]
