@@ -111,6 +111,49 @@ pub(crate) async fn build_compaction_initial_context(
     }
 }
 
+pub(crate) async fn install_hook_replacement(
+    sess: &Arc<Session>,
+    turn_context: &Arc<TurnContext>,
+    initial_context_injection: InitialContextInjection,
+    items: Vec<ResponseItem>,
+) -> CodexResult<()> {
+    let compaction_item = TurnItem::ContextCompaction(ContextCompactionItem::new());
+    sess.emit_turn_item_started(turn_context, &compaction_item)
+        .await;
+    let (window_number, window_ids) = sess.advance_auto_compact_window().await;
+    let (initial_context, world_state_baseline) =
+        build_compaction_initial_context(sess.as_ref(), &initial_context_injection).await;
+    let mut replacement = items.into_iter().map(ResponseItemEnvelope::new).collect();
+    if !initial_context.is_empty() {
+        replacement =
+            insert_initial_context_before_last_real_user_or_summary(replacement, initial_context);
+    }
+    let reference_context_item = match initial_context_injection {
+        InitialContextInjection::DoNotInject => None,
+        InitialContextInjection::BeforeLastUserMessage { step_context, .. } => {
+            Some(step_context.to_turn_context_item())
+        }
+    };
+    sess.replace_compacted_history(
+        replacement,
+        reference_context_item,
+        world_state_baseline,
+        CompactedHistoryMetadata {
+            message: "Hook-provided compaction replacement".to_string(),
+            window_number,
+            window_ids,
+            compaction_response_id: None,
+            compaction_model_hash: turn_context.model_info().comp_hash.clone(),
+            reviewer_compaction_hash: None,
+        },
+    )
+    .await;
+    sess.recompute_token_usage(turn_context).await;
+    sess.emit_turn_item_completed(turn_context, compaction_item)
+        .await;
+    Ok(())
+}
+
 pub(crate) async fn run_inline_auto_compact_task(
     sess: Arc<Session>,
     turn_context: Arc<TurnContext>,
@@ -185,6 +228,16 @@ async fn run_compact_task_inner(
     let pre_compact_outcome = run_pre_compact_hooks(&sess, &turn_context, trigger).await;
     match pre_compact_outcome {
         PreCompactHookOutcome::Continue => {}
+        PreCompactHookOutcome::Replace(items) => {
+            install_hook_replacement(&sess, &turn_context, initial_context_injection, items)
+                .await?;
+            let post_compact_outcome = run_post_compact_hooks(&sess, &turn_context, trigger).await;
+            if let PostCompactHookOutcome::Stopped = post_compact_outcome {
+                return Err(CodexErr::TurnAborted);
+            }
+            return Ok(());
+        }
+        PreCompactHookOutcome::Invalid(reason) => return Err(CodexErr::InvalidRequest(reason)),
         PreCompactHookOutcome::Stopped => {
             let error = CodexErr::TurnAborted;
             attempt

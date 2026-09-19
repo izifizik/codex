@@ -29,6 +29,7 @@ use codex_mcp::CODEX_APPS_MCP_SERVER_NAME;
 use codex_otel::HOOK_RUN_DURATION_METRIC;
 use codex_otel::HOOK_RUN_METRIC;
 use codex_plugin::ExecutorPluginHookSource;
+use codex_protocol::error::CodexErr;
 use codex_protocol::items::FunctionCallOutputItem;
 use codex_protocol::items::TurnItem;
 use codex_protocol::items::UserMessageItem;
@@ -556,6 +557,28 @@ pub(crate) async fn run_pre_compact_hooks(
     emit_hook_completed_events(sess, turn_context, outcome.hook_events).await;
     if outcome.should_stop {
         PreCompactHookOutcome::Stopped
+    } else if outcome.replacement_conflict {
+        PreCompactHookOutcome::Invalid(
+            "multiple PreCompact hooks returned compaction replacements".to_string(),
+        )
+    } else if let Some(items) = outcome.replacement {
+        let items = items
+            .into_iter()
+            .map(|item| {
+                serde_json::from_value(item).map_err(|error| {
+                    CodexErr::InvalidRequest(format!(
+                        "invalid PreCompact replacement item: {error}"
+                    ))
+                })
+            })
+            .collect::<Result<Vec<codex_protocol::models::ResponseItem>, _>>();
+        match items {
+            Ok(items) => match validate_compaction_replacement(items) {
+                Ok(items) => PreCompactHookOutcome::Replace(items),
+                Err(error) => PreCompactHookOutcome::Invalid(error),
+            },
+            Err(error) => PreCompactHookOutcome::Invalid(error.to_string()),
+        }
     } else {
         PreCompactHookOutcome::Continue
     }
@@ -563,7 +586,40 @@ pub(crate) async fn run_pre_compact_hooks(
 
 pub(crate) enum PreCompactHookOutcome {
     Continue,
+    Replace(Vec<codex_protocol::models::ResponseItem>),
+    Invalid(String),
     Stopped,
+}
+
+fn validate_compaction_replacement(
+    items: Vec<codex_protocol::models::ResponseItem>,
+) -> Result<Vec<codex_protocol::models::ResponseItem>, String> {
+    if items.is_empty() {
+        return Err("PreCompact replacement is empty".to_string());
+    }
+    // Tool calls and outputs are historical records. A replacement may intentionally retain only
+    // part of a tool exchange, so pairing is left to the same history normalization used by the
+    // native compaction paths rather than rejecting partial transcripts here.
+    if items.iter().any(|item| {
+        !matches!(
+            item,
+            codex_protocol::models::ResponseItem::Message { .. }
+                | codex_protocol::models::ResponseItem::AgentMessage { .. }
+                | codex_protocol::models::ResponseItem::Reasoning { .. }
+                | codex_protocol::models::ResponseItem::LocalShellCall { .. }
+                | codex_protocol::models::ResponseItem::FunctionCall { .. }
+                | codex_protocol::models::ResponseItem::ToolSearchCall { .. }
+                | codex_protocol::models::ResponseItem::FunctionCallOutput { .. }
+                | codex_protocol::models::ResponseItem::CustomToolCall { .. }
+                | codex_protocol::models::ResponseItem::CustomToolCallOutput { .. }
+                | codex_protocol::models::ResponseItem::ToolSearchOutput { .. }
+                | codex_protocol::models::ResponseItem::WebSearchCall { .. }
+                | codex_protocol::models::ResponseItem::ImageGenerationCall { .. }
+        )
+    }) {
+        return Err("PreCompact replacement contains unsupported context item".to_string());
+    }
+    Ok(items)
 }
 
 pub(crate) enum PostCompactHookOutcome {
@@ -1085,12 +1141,47 @@ mod tests {
     use super::emit_hook_started_events;
     use super::hook_run_analytics_payload;
     use super::hook_run_metric_tags;
+    use super::validate_compaction_replacement;
     use crate::session::tests::make_session_and_context;
     use crate::session::tests::make_session_and_context_with_rx;
     use codex_protocol::protocol::HookCompletedEvent;
     use codex_protocol::protocol::HookRunSummary;
     use codex_utils_absolute_path::test_support::PathBufExt;
     use codex_utils_absolute_path::test_support::test_path_buf;
+
+    #[test]
+    fn compaction_replacement_rejects_codex_owned_items() {
+        let item = serde_json::from_value(serde_json::json!({
+            "type": "compaction",
+            "encrypted_content": "internal",
+        }))
+        .expect("valid compaction item");
+
+        assert_eq!(
+            validate_compaction_replacement(vec![item]),
+            Err("PreCompact replacement contains unsupported context item".to_string())
+        );
+    }
+
+    #[test]
+    fn compaction_replacement_accepts_completed_search_and_image_records() {
+        let items = vec![
+            serde_json::from_value(serde_json::json!({
+                "type": "web_search_call",
+                "status": "completed",
+                "action": {"type": "search", "query": "weather"},
+            }))
+            .expect("valid web search record"),
+            serde_json::from_value(serde_json::json!({
+                "type": "image_generation_call",
+                "status": "completed",
+                "result": "image-data",
+            }))
+            .expect("valid image generation record"),
+        ];
+
+        assert!(validate_compaction_replacement(items).is_ok());
+    }
 
     #[test]
     fn additional_context_messages_stay_separate_and_ordered() {
