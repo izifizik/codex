@@ -281,6 +281,35 @@ with Path(r"{manual_post_log_path}").open("a", encoding="utf-8") as handle:
     fs::write(home.join("hooks.json"), hooks.to_string()).expect("write hooks.json");
 }
 
+fn write_replacement_compact_hooks(home: &Path) {
+    let pre = home.join("pre_replace.py");
+    let post = home.join("post_replace.py");
+    fs::write(
+        &pre,
+        format!(
+            "import json\nfrom pathlib import Path\nimport sys\njson.load(sys.stdin)\nPath(r\"{}/lifecycle.log\").open(\"a\").write(\"precompact-called\\n\")\nprint(json.dumps({{\"hookSpecificOutput\":{{\"hookEventName\":\"PreCompact\",\"replacement\":{{\"items\":[{{\"type\":\"message\",\"role\":\"user\",\"content\":[{{\"type\":\"input_text\",\"text\":\"HOOK_REPLACEMENT_SENTINEL_7F3A\"}}]}}]}}}}}}))\n",
+            home.display()
+        ),
+    )
+    .expect("write replacement pre hook");
+    fs::write(
+        &post,
+        format!(
+            "import json\nfrom pathlib import Path\nimport sys\njson.load(sys.stdin)\nPath(r\"{}/lifecycle.log\").open(\"a\").write(\"postcompact-called\\n\")\n",
+            home.display()
+        ),
+    )
+    .expect("write replacement post hook");
+    fs::write(
+        home.join("hooks.json"),
+        json!({"hooks": {
+            "PreCompact": [{"matcher": "manual", "hooks": [{"type": "command", "command": python_hook_command(&pre)}]}],
+            "PostCompact": [{"matcher": "manual", "hooks": [{"type": "command", "command": python_hook_command(&post)}]}]
+        }}).to_string(),
+    )
+    .expect("write hooks.json");
+}
+
 fn non_openai_model_provider(server: &MockServer) -> ModelProviderInfo {
     let mut provider =
         built_in_model_providers(/* openai_base_url */ /*openai_base_url*/ None)["openai"].clone();
@@ -907,6 +936,64 @@ async fn compact_hooks_respect_matchers_and_post_runs_after_compaction() {
     assert!(input.get("reason").is_none());
     assert!(input.get("phase").is_none());
     assert!(input.get("implementation").is_none());
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn pre_compact_replacement_short_circuits_native_compaction() {
+    skip_if_no_network!();
+
+    let server = start_mock_server().await;
+    let request_log = mount_sse_once(
+        &server,
+        sse(vec![
+            ev_assistant_message("m0", FIRST_REPLY),
+            ev_completed_with_tokens("r0", /*total_tokens*/ 80),
+        ]),
+    )
+    .await;
+    let model_provider = non_openai_model_provider(&server);
+    let mut builder = test_codex().with_pre_build_hook(write_replacement_compact_hooks);
+    builder = builder.with_config(move |config| {
+        config.model_provider = model_provider;
+        trust_discovered_hooks(config);
+        set_test_compact_prompt(config);
+    });
+    let test = builder.build(&server).await.expect("create conversation");
+    let codex = test.codex.clone();
+
+    codex
+        .start_or_steer_turn(TurnInputRequest::user_input(vec![UserInput::Text {
+            text: "before replacement compact".to_string(),
+            text_elements: Vec::new(),
+        }]))
+        .await
+        .expect("submit first user turn");
+    wait_for_event(&codex, |ev| matches!(ev, EventMsg::TurnComplete(_))).await;
+
+    codex.submit(Op::Compact).await.expect("trigger compact");
+    wait_for_event(&codex, |ev| matches!(ev, EventMsg::TurnComplete(_))).await;
+
+    let rollout_path = test
+        .session_configured
+        .rollout_path
+        .as_ref()
+        .expect("rollout path");
+    let history = replacement_history_from_rollout(rollout_path).expect("replacement history");
+    let history_text = serde_json::to_string(&history).expect("serialize history");
+    assert!(history_text.contains("HOOK_REPLACEMENT_SENTINEL_7F3A"));
+    assert!(!history_text.contains(SUMMARY_TEXT));
+    assert_eq!(
+        request_log.requests().len(),
+        1,
+        "native compactor was skipped"
+    );
+
+    let lifecycle = fs::read_to_string(test.codex_home_path().join("lifecycle.log"))
+        .expect("read lifecycle markers");
+    assert_eq!(
+        lifecycle.lines().collect::<Vec<_>>(),
+        ["precompact-called", "postcompact-called",]
+    );
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
