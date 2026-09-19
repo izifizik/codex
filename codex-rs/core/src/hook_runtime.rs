@@ -557,6 +557,10 @@ pub(crate) async fn run_pre_compact_hooks(
     emit_hook_completed_events(sess, turn_context, outcome.hook_events).await;
     if outcome.should_stop {
         PreCompactHookOutcome::Stopped
+    } else if outcome.replacement_conflict {
+        PreCompactHookOutcome::Invalid(
+            "multiple PreCompact hooks returned compaction replacements".to_string(),
+        )
     } else if let Some(items) = outcome.replacement {
         let items = items
             .into_iter()

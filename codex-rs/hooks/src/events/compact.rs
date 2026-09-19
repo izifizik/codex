@@ -54,6 +54,7 @@ pub struct PreCompactOutcome {
     pub should_stop: bool,
     pub stop_reason: Option<String>,
     pub replacement: Option<Vec<serde_json::Value>>,
+    pub replacement_conflict: bool,
 }
 
 pub(crate) fn preview_pre(
@@ -85,6 +86,7 @@ pub(crate) async fn run_pre(
             should_stop: false,
             stop_reason: None,
             replacement: None,
+            replacement_conflict: false,
         };
     }
 
@@ -100,6 +102,7 @@ pub(crate) async fn run_pre(
                 should_stop: false,
                 stop_reason: None,
                 replacement: None,
+                replacement_conflict: false,
             };
         }
     };
@@ -128,8 +131,9 @@ pub(crate) async fn run_pre(
         replacement: match replacements.as_slice() {
             [] => None,
             [replacement] => Some(replacement.clone()),
-            _ => Some(Vec::new()),
+            _ => None,
         },
+        replacement_conflict: replacements.len() > 1,
     }
 }
 
