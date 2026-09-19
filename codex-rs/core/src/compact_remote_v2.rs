@@ -167,7 +167,7 @@ async fn run_remote_compact_task_inner(
                 initial_context_injection,
                 items,
             )
-            .await;
+            .await?;
             let post_compact_outcome = run_post_compact_hooks(sess, turn_context, trigger).await;
             if let PostCompactHookOutcome::Stopped = post_compact_outcome {
                 return Err(CodexErr::TurnAborted);

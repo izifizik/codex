@@ -569,8 +569,10 @@ pub(crate) async fn run_pre_compact_hooks(
             })
             .collect::<Result<Vec<codex_protocol::models::ResponseItem>, _>>();
         match items {
-            Ok(items) if !items.is_empty() => PreCompactHookOutcome::Replace(items),
-            Ok(_) => PreCompactHookOutcome::Invalid("PreCompact replacement is empty".to_string()),
+            Ok(items) => match validate_compaction_replacement(items) {
+                Ok(items) => PreCompactHookOutcome::Replace(items),
+                Err(error) => PreCompactHookOutcome::Invalid(error),
+            },
             Err(error) => PreCompactHookOutcome::Invalid(error.to_string()),
         }
     } else {
@@ -583,6 +585,25 @@ pub(crate) enum PreCompactHookOutcome {
     Replace(Vec<codex_protocol::models::ResponseItem>),
     Invalid(String),
     Stopped,
+}
+
+fn validate_compaction_replacement(
+    items: Vec<codex_protocol::models::ResponseItem>,
+) -> Result<Vec<codex_protocol::models::ResponseItem>, String> {
+    if items.is_empty() {
+        return Err("PreCompact replacement is empty".to_string());
+    }
+    if items.iter().any(|item| {
+        matches!(
+            item,
+            codex_protocol::models::ResponseItem::AdditionalTools { .. }
+                | codex_protocol::models::ResponseItem::Compaction { .. }
+                | codex_protocol::models::ResponseItem::ConfigurationUpdate { .. }
+        )
+    }) {
+        return Err("PreCompact replacement contains Codex-owned context".to_string());
+    }
+    Ok(items)
 }
 
 pub(crate) enum PostCompactHookOutcome {
@@ -1104,12 +1125,24 @@ mod tests {
     use super::emit_hook_started_events;
     use super::hook_run_analytics_payload;
     use super::hook_run_metric_tags;
+    use super::validate_compaction_replacement;
     use crate::session::tests::make_session_and_context;
     use crate::session::tests::make_session_and_context_with_rx;
     use codex_protocol::protocol::HookCompletedEvent;
     use codex_protocol::protocol::HookRunSummary;
     use codex_utils_absolute_path::test_support::PathBufExt;
     use codex_utils_absolute_path::test_support::test_path_buf;
+
+    #[test]
+    fn compaction_replacement_rejects_codex_owned_items() {
+        let item = serde_json::from_value(serde_json::json!({
+            "type": "compaction",
+            "encrypted_content": "internal",
+        }))
+        .expect("valid compaction item");
+
+        assert!(validate_compaction_replacement(vec![item]).is_err());
+    }
 
     #[test]
     fn additional_context_messages_stay_separate_and_ordered() {

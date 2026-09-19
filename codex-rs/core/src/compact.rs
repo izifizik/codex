@@ -116,7 +116,7 @@ pub(crate) async fn install_hook_replacement(
     turn_context: &Arc<TurnContext>,
     initial_context_injection: InitialContextInjection,
     items: Vec<ResponseItem>,
-) {
+) -> CodexResult<()> {
     let compaction_item = TurnItem::ContextCompaction(ContextCompactionItem::new());
     sess.emit_turn_item_started(turn_context, &compaction_item)
         .await;
@@ -151,6 +151,7 @@ pub(crate) async fn install_hook_replacement(
     sess.recompute_token_usage(turn_context).await;
     sess.emit_turn_item_completed(turn_context, compaction_item)
         .await;
+    Ok(())
 }
 
 pub(crate) async fn run_inline_auto_compact_task(
@@ -228,7 +229,8 @@ async fn run_compact_task_inner(
     match pre_compact_outcome {
         PreCompactHookOutcome::Continue => {}
         PreCompactHookOutcome::Replace(items) => {
-            install_hook_replacement(&sess, &turn_context, initial_context_injection, items).await;
+            install_hook_replacement(&sess, &turn_context, initial_context_injection, items)
+                .await?;
             let post_compact_outcome = run_post_compact_hooks(&sess, &turn_context, trigger).await;
             if let PostCompactHookOutcome::Stopped = post_compact_outcome {
                 return Err(CodexErr::TurnAborted);
