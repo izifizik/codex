@@ -295,7 +295,7 @@ fn write_replacement_compact_hooks(home: &Path) {
     fs::write(
         &post,
         format!(
-            "import json\nfrom pathlib import Path\nimport sys\njson.load(sys.stdin)\nPath(r\"{}/lifecycle.log\").open(\"a\").write(\"postcompact-called\\n\")\n",
+            "import json\nfrom pathlib import Path\nimport sys\npayload = json.load(sys.stdin)\ntranscript = payload.get(\"transcript_path\")\nsaw_replacement = bool(transcript) and \"HOOK_REPLACEMENT_SENTINEL_7F3A\" in Path(transcript).read_text(encoding=\"utf-8\")\nwith Path(r\"{}/lifecycle.log\").open(\"a\", encoding=\"utf-8\") as handle:\n    handle.write((\"postcompact-saw-replacement\" if saw_replacement else \"postcompact-missed-replacement\") + \"\\n\")\n",
             home.display()
         ),
     )
@@ -992,7 +992,7 @@ async fn pre_compact_replacement_short_circuits_native_compaction() {
         .expect("read lifecycle markers");
     assert_eq!(
         lifecycle.lines().collect::<Vec<_>>(),
-        ["precompact-called", "postcompact-called",]
+        ["precompact-called", "postcompact-saw-replacement",]
     );
 }
 
