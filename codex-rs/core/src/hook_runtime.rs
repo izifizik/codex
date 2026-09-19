@@ -593,6 +593,9 @@ fn validate_compaction_replacement(
     if items.is_empty() {
         return Err("PreCompact replacement is empty".to_string());
     }
+    // Tool calls and outputs are historical records. A replacement may intentionally retain only
+    // part of a tool exchange, so pairing is left to the same history normalization used by the
+    // native compaction paths rather than rejecting partial transcripts here.
     if items.iter().any(|item| {
         !matches!(
             item,
@@ -1154,6 +1157,26 @@ mod tests {
             validate_compaction_replacement(vec![item]),
             Err("PreCompact replacement contains unsupported context item".to_string())
         );
+    }
+
+    #[test]
+    fn compaction_replacement_accepts_completed_search_and_image_records() {
+        let items = vec![
+            serde_json::from_value(serde_json::json!({
+                "type": "web_search_call",
+                "status": "completed",
+                "action": {"type": "search", "query": "weather"},
+            }))
+            .expect("valid web search record"),
+            serde_json::from_value(serde_json::json!({
+                "type": "image_generation_call",
+                "status": "completed",
+                "result": "image-data",
+            }))
+            .expect("valid image generation record"),
+        ];
+
+        assert!(validate_compaction_replacement(items).is_ok());
     }
 
     #[test]
