@@ -53,6 +53,7 @@ pub struct PreCompactOutcome {
     pub hook_events: Vec<HookCompletedEvent>,
     pub should_stop: bool,
     pub stop_reason: Option<String>,
+    pub replacement: Option<Vec<serde_json::Value>>,
 }
 
 pub(crate) fn preview_pre(
@@ -83,6 +84,7 @@ pub(crate) async fn run_pre(
             hook_events: Vec::new(),
             should_stop: false,
             stop_reason: None,
+            replacement: None,
         };
     }
 
@@ -97,6 +99,7 @@ pub(crate) async fn run_pre(
                 ),
                 should_stop: false,
                 stop_reason: None,
+                replacement: None,
             };
         }
     };
@@ -114,10 +117,19 @@ pub(crate) async fn run_pre(
     let stop_reason = results
         .iter()
         .find_map(|result| result.data.stop_reason.clone());
+    let replacements = results
+        .iter()
+        .filter_map(|result| result.data.replacement.clone())
+        .collect::<Vec<_>>();
     PreCompactOutcome {
         hook_events: results.into_iter().map(|result| result.completed).collect(),
         should_stop,
         stop_reason,
+        replacement: match replacements.as_slice() {
+            [] => None,
+            [replacement] => Some(replacement.clone()),
+            _ => Some(Vec::new()),
+        },
     }
 }
 
@@ -221,6 +233,7 @@ fn post_command_input_json(request: &PostCompactRequest) -> Result<String, serde
 struct CompactHandlerData {
     should_stop: bool,
     stop_reason: Option<String>,
+    replacement: Option<Vec<serde_json::Value>>,
 }
 
 fn parse_pre_completed(
@@ -262,6 +275,7 @@ fn parse_completed(
     let mut status = HookRunStatus::Completed;
     let mut should_stop = false;
     let mut stop_reason = None;
+    let mut replacement = None;
 
     match run_result.error.as_deref() {
         Some(error) => {
@@ -284,6 +298,9 @@ fn parse_completed(
                     }
                     let _ = parsed.universal.suppress_output;
                     if handler.can_apply_control_effects() {
+                        if parsed.invalid_reason.is_none() {
+                            replacement = parsed.replacement.map(|value| value.items);
+                        }
                         if !parsed.universal.continue_processing {
                             status = HookRunStatus::Stopped;
                             should_stop = true;
@@ -336,6 +353,7 @@ fn parse_completed(
         data: CompactHandlerData {
             should_stop,
             stop_reason,
+            replacement,
         },
         completion_order: 0,
     }
@@ -442,6 +460,38 @@ mod tests {
                 text: "nope".to_string(),
             }]
         );
+    }
+
+    #[test]
+    fn replacement_is_parsed_for_pre_compact() {
+        let parsed = parse_pre_completed(
+            &handler(HookEventName::PreCompact),
+            run_result(
+                Some(0),
+                r#"{"hookSpecificOutput":{"hookEventName":"PreCompact","replacement":{"items":[{"type":"message","role":"user","content":[{"type":"input_text","text":"kept"}]}]}}}"#,
+                "",
+            ),
+            Some("turn-1".to_string()),
+        );
+
+        assert_eq!(parsed.completed.run.status, HookRunStatus::Completed);
+        assert_eq!(parsed.data.replacement.expect("replacement").len(), 1);
+    }
+
+    #[test]
+    fn empty_replacement_is_rejected() {
+        let parsed = parse_pre_completed(
+            &handler(HookEventName::PreCompact),
+            run_result(
+                Some(0),
+                r#"{"hookSpecificOutput":{"hookEventName":"PreCompact","replacement":{"items":[]}}}"#,
+                "",
+            ),
+            Some("turn-1".to_string()),
+        );
+
+        assert_eq!(parsed.completed.run.status, HookRunStatus::Failed);
+        assert!(parsed.data.replacement.is_none());
     }
 
     #[test]

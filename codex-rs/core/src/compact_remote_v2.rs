@@ -160,6 +160,21 @@ async fn run_remote_compact_task_inner(
     let pre_compact_outcome = run_pre_compact_hooks(sess, turn_context, trigger).await;
     match pre_compact_outcome {
         PreCompactHookOutcome::Continue => {}
+        PreCompactHookOutcome::Replace(items) => {
+            crate::compact::install_hook_replacement(
+                sess,
+                turn_context,
+                initial_context_injection,
+                items,
+            )
+            .await;
+            let post_compact_outcome = run_post_compact_hooks(sess, turn_context, trigger).await;
+            if let PostCompactHookOutcome::Stopped = post_compact_outcome {
+                return Err(CodexErr::TurnAborted);
+            }
+            return Ok(());
+        }
+        PreCompactHookOutcome::Invalid(reason) => return Err(CodexErr::InvalidRequest(reason)),
         PreCompactHookOutcome::Stopped => {
             let error = CodexErr::TurnAborted;
             attempt

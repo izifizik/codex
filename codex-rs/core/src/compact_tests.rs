@@ -23,6 +23,31 @@ use pretty_assertions::assert_eq;
 use serde_json::json;
 use test_case::test_case;
 
+#[tokio::test]
+async fn hook_replacement_installs_context_without_native_compaction() {
+    let (session, turn, _events) = make_session_and_context_with_auth_and_config_and_rx(
+        CodexAuth::create_dummy_chatgpt_auth_for_testing(),
+        Vec::new(),
+        |_| {},
+    )
+    .await;
+    let replacement = user_message("external compacted context");
+
+    install_hook_replacement(
+        &session,
+        &turn,
+        InitialContextInjection::DoNotInject,
+        vec![replacement],
+    )
+    .await;
+
+    let history = session.clone_history().await;
+    assert!(history.raw_items().any(|item| {
+        matches!(item, ResponseItem::Message { content, .. }
+            if content_items_to_text(content).as_deref() == Some("external compacted context"))
+    }));
+}
+
 #[test_case(true; "metadata enabled")]
 #[test_case(false; "metadata disabled after capture")]
 #[tokio::test]
@@ -134,8 +159,7 @@ async fn local_compaction_respects_tool_metadata_state(
         .iter()
         .map(|item| {
             serde_json::to_vec(&item["internal_chat_message_metadata_passthrough"])
-                .unwrap()
-                .len()
+                .map_or(0, |bytes| bytes.len())
         })
         .sum();
     // Compaction does not rebudget source records as a normal inference request.

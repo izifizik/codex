@@ -65,6 +65,12 @@ pub(crate) struct StopOutput {
 pub(crate) struct StatelessHookOutput {
     pub universal: UniversalOutput,
     pub invalid_reason: Option<String>,
+    pub replacement: Option<CompactionReplacement>,
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct CompactionReplacement {
+    pub items: Vec<serde_json::Value>,
 }
 
 #[derive(Debug, Clone)]
@@ -243,7 +249,19 @@ pub(crate) fn parse_pre_compact(stdout: &str) -> Option<StatelessHookOutput> {
     let universal = UniversalOutput::from(wire.universal);
     Some(StatelessHookOutput {
         universal,
-        invalid_reason: None,
+        invalid_reason: wire.hook_specific_output.as_ref().and_then(|output| {
+            output.replacement.as_ref().and_then(|replacement| {
+                replacement
+                    .items
+                    .is_empty()
+                    .then_some("PreCompact replacement must contain at least one item".to_string())
+            })
+        }),
+        replacement: wire.hook_specific_output.and_then(|output| {
+            output.replacement.map(|replacement| CompactionReplacement {
+                items: replacement.items,
+            })
+        }),
     })
 }
 
@@ -253,6 +271,7 @@ pub(crate) fn parse_post_compact(stdout: &str) -> Option<StatelessHookOutput> {
     Some(StatelessHookOutput {
         universal,
         invalid_reason: None,
+        replacement: None,
     })
 }
 

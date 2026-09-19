@@ -29,6 +29,7 @@ use codex_mcp::CODEX_APPS_MCP_SERVER_NAME;
 use codex_otel::HOOK_RUN_DURATION_METRIC;
 use codex_otel::HOOK_RUN_METRIC;
 use codex_plugin::ExecutorPluginHookSource;
+use codex_protocol::error::CodexErr;
 use codex_protocol::items::FunctionCallOutputItem;
 use codex_protocol::items::TurnItem;
 use codex_protocol::items::UserMessageItem;
@@ -556,6 +557,22 @@ pub(crate) async fn run_pre_compact_hooks(
     emit_hook_completed_events(sess, turn_context, outcome.hook_events).await;
     if outcome.should_stop {
         PreCompactHookOutcome::Stopped
+    } else if let Some(items) = outcome.replacement {
+        let items = items
+            .into_iter()
+            .map(|item| {
+                serde_json::from_value(item).map_err(|error| {
+                    CodexErr::InvalidRequest(format!(
+                        "invalid PreCompact replacement item: {error}"
+                    ))
+                })
+            })
+            .collect::<Result<Vec<codex_protocol::models::ResponseItem>, _>>();
+        match items {
+            Ok(items) if !items.is_empty() => PreCompactHookOutcome::Replace(items),
+            Ok(_) => PreCompactHookOutcome::Invalid("PreCompact replacement is empty".to_string()),
+            Err(error) => PreCompactHookOutcome::Invalid(error.to_string()),
+        }
     } else {
         PreCompactHookOutcome::Continue
     }
@@ -563,6 +580,8 @@ pub(crate) async fn run_pre_compact_hooks(
 
 pub(crate) enum PreCompactHookOutcome {
     Continue,
+    Replace(Vec<codex_protocol::models::ResponseItem>),
+    Invalid(String),
     Stopped,
 }
 

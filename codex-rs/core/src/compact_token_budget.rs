@@ -64,6 +64,24 @@ async fn run_compact_task_inner(
     let pre_compact_outcome = run_pre_compact_hooks(sess, turn_context, trigger).await;
     match pre_compact_outcome {
         PreCompactHookOutcome::Continue => {}
+        PreCompactHookOutcome::Replace(items) => {
+            crate::compact::install_hook_replacement(
+                sess,
+                turn_context,
+                crate::compact::InitialContextInjection::BeforeLastUserMessage {
+                    world_state,
+                    step_context: Arc::clone(step_context),
+                },
+                items,
+            )
+            .await;
+            let post_compact_outcome = run_post_compact_hooks(sess, turn_context, trigger).await;
+            if let PostCompactHookOutcome::Stopped = post_compact_outcome {
+                return Err(CodexErr::TurnAborted);
+            }
+            return Ok(());
+        }
+        PreCompactHookOutcome::Invalid(reason) => return Err(CodexErr::InvalidRequest(reason)),
         PreCompactHookOutcome::Stopped => return Err(CodexErr::TurnAborted),
     }
 
